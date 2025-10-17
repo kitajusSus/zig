@@ -250,7 +250,7 @@ pub const GetNameError = error{
     Unexpected,
 } || posix.PrctlError || posix.ReadError || std.fs.File.OpenError || std.fmt.BufPrintError;
 
-/// On Windows, the result is encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, the result is encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On other platforms, the result is an opaque sequence of bytes with no particular encoding.
 pub fn getName(self: Thread, buffer_ptr: *[max_name_len:0]u8) GetNameError!?[]const u8 {
     buffer_ptr[max_name_len] = 0;
@@ -530,7 +530,7 @@ fn callFn(comptime f: anytype, args: anytype) switch (Impl) {
                     @call(.auto, f, args) catch |err| {
                         std.debug.print("error: {s}\n", .{@errorName(err)});
                         if (@errorReturnTrace()) |trace| {
-                            std.debug.dumpStackTrace(trace.*);
+                            std.debug.dumpStackTrace(trace);
                         }
                     };
 
@@ -1636,4 +1636,46 @@ test detach {
 
     event.wait();
     try std.testing.expectEqual(value, 1);
+}
+
+test "Thread.getCpuCount" {
+    if (native_os == .wasi) return error.SkipZigTest;
+
+    const cpu_count = try Thread.getCpuCount();
+    try std.testing.expect(cpu_count >= 1);
+}
+
+fn testThreadIdFn(thread_id: *Thread.Id) void {
+    thread_id.* = Thread.getCurrentId();
+}
+
+test "Thread.getCurrentId" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var thread_current_id: Thread.Id = undefined;
+    const thread = try Thread.spawn(.{}, testThreadIdFn, .{&thread_current_id});
+    thread.join();
+    try std.testing.expect(Thread.getCurrentId() != thread_current_id);
+}
+
+test "thread local storage" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    if (builtin.cpu.arch == .armeb or builtin.cpu.arch == .thumbeb) {
+        // https://github.com/ziglang/zig/issues/24061
+        return error.SkipZigTest;
+    }
+
+    const thread1 = try Thread.spawn(.{}, testTls, .{});
+    const thread2 = try Thread.spawn(.{}, testTls, .{});
+    try testTls();
+    thread1.join();
+    thread2.join();
+}
+
+threadlocal var x: i32 = 1234;
+fn testTls() !void {
+    if (x != 1234) return error.TlsBadStartValue;
+    x += 1;
+    if (x != 1235) return error.TlsBadEndValue;
 }

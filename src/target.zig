@@ -231,6 +231,16 @@ pub fn hasLldSupport(ofmt: std.Target.ObjectFormat) bool {
     };
 }
 
+pub fn hasNewLinkerSupport(ofmt: std.Target.ObjectFormat, backend: std.builtin.CompilerBackend) bool {
+    return switch (ofmt) {
+        .elf, .coff => switch (backend) {
+            .stage2_x86_64 => true,
+            else => false,
+        },
+        else => false,
+    };
+}
+
 /// The set of targets that our own self-hosted backends have robust support for.
 /// Used to select between LLVM backend and self-hosted backend when compiling in
 /// debug mode. A given target should only return true here if it is passing greater
@@ -238,7 +248,7 @@ pub fn hasLldSupport(ofmt: std.Target.ObjectFormat) bool {
 pub fn selfHostedBackendIsAsRobustAsLlvm(target: *const std.Target) bool {
     if (target.cpu.arch.isSpirV()) return true;
     if (target.cpu.arch == .x86_64 and target.ptrBitWidth() == 64) {
-        if (target.os.tag == .netbsd or target.os.tag == .openbsd) {
+        if (target.os.tag.isBSD()) {
             // Self-hosted linker needs work: https://github.com/ziglang/zig/issues/24341
             return false;
         }
@@ -365,11 +375,7 @@ pub fn canBuildLibCompilerRt(target: *const std.Target) enum { no, yes, llvm_onl
         else => {},
     }
     return switch (zigBackend(target, false)) {
-        .stage2_aarch64 => .yes,
-        .stage2_x86_64 => switch (target.ofmt) {
-            .elf, .macho => .yes,
-            else => .llvm_only,
-        },
+        .stage2_aarch64, .stage2_x86_64 => .yes,
         else => .llvm_only,
     };
 }
@@ -383,10 +389,7 @@ pub fn canBuildLibUbsanRt(target: *const std.Target) enum { no, yes, llvm_only, 
     }
     return switch (zigBackend(target, false)) {
         .stage2_wasm => .llvm_lld_only,
-        .stage2_x86_64 => switch (target.ofmt) {
-            .elf, .macho => .yes,
-            else => .llvm_only,
-        },
+        .stage2_x86_64 => .yes,
         else => .llvm_only,
     };
 }
@@ -506,7 +509,7 @@ pub fn defaultUnwindTables(target: *const std.Target, libunwind: bool, libtsan: 
     if (target.os.tag.isDarwin()) return .async;
     if (libunwind) return .async;
     if (libtsan) return .async;
-    if (std.debug.Dwarf.abi.supportsUnwinding(target)) return .async;
+    if (std.debug.Dwarf.supportsUnwinding(target)) return .async;
     return .none;
 }
 
@@ -625,14 +628,6 @@ pub fn isDynamicAMDGCNFeature(target: *const std.Target, feature: std.Target.Cpu
 }
 
 pub fn llvmMachineAbi(target: *const std.Target) ?[:0]const u8 {
-    // LLD does not support ELFv1. Rather than having LLVM produce ELFv1 code and then linking it
-    // into a broken ELFv2 binary, just force LLVM to use ELFv2 as well. This will break when glibc
-    // is linked as glibc only supports ELFv2 for little endian, but there's nothing we can do about
-    // that. With this hack, `powerpc64-linux-none` will at least work.
-    //
-    // Once our self-hosted linker can handle both ABIs, this hack should go away.
-    if (target.cpu.arch == .powerpc64) return "elfv2";
-
     return switch (target.cpu.arch) {
         .arm, .armeb, .thumb, .thumbeb => "aapcs",
         .loongarch64 => switch (target.abi) {
@@ -650,15 +645,7 @@ pub fn llvmMachineAbi(target: *const std.Target) ?[:0]const u8 {
             .gnuabin32, .muslabin32 => "n32",
             else => "n64",
         },
-        .powerpc64 => switch (target.os.tag) {
-            .freebsd => if (target.os.version_range.semver.isAtLeast(.{ .major = 13, .minor = 0, .patch = 0 }) orelse false)
-                "elfv2"
-            else
-                "elfv1",
-            .openbsd => "elfv2",
-            else => if (target.abi.isMusl()) "elfv2" else "elfv1",
-        },
-        .powerpc64le => "elfv2",
+        .powerpc64, .powerpc64le => "elfv2", // We do not support ELFv1.
         .riscv64, .riscv64be => if (target.cpu.has(.riscv, .e))
             "lp64e"
         else if (target.cpu.has(.riscv, .d))
@@ -786,10 +773,9 @@ pub fn supportsTailCall(target: *const std.Target, backend: std.builtin.Compiler
 }
 
 pub fn supportsThreads(target: *const std.Target, backend: std.builtin.CompilerBackend) bool {
+    _ = target;
     return switch (backend) {
         .stage2_aarch64 => false,
-        .stage2_powerpc => true,
-        .stage2_x86_64 => target.ofmt == .macho or target.ofmt == .elf,
         else => true,
     };
 }

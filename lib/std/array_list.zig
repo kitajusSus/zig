@@ -172,7 +172,7 @@ pub fn AlignedManaged(comptime T: type, comptime alignment: ?mem.Alignment) type
             // a new buffer and doing our own copy. With a realloc() call,
             // the allocator implementation would pointlessly copy our
             // extra capacity.
-            const new_capacity = Aligned(T, alignment).growCapacity(self.capacity, new_len);
+            const new_capacity = Aligned(T, alignment).growCapacity(new_len);
             const old_memory = self.allocatedSlice();
             if (self.allocator.remap(old_memory, new_capacity)) |new_memory| {
                 self.items.ptr = new_memory.ptr;
@@ -277,14 +277,13 @@ pub fn AlignedManaged(comptime T: type, comptime alignment: ?mem.Alignment) type
         /// The empty slot is filled from the end of the list.
         /// This operation is O(1).
         /// This may not preserve item order. Use `orderedRemove` if you need to preserve order.
-        /// Asserts that the list is not empty.
         /// Asserts that the index is in bounds.
         pub fn swapRemove(self: *Self, i: usize) T {
-            if (self.items.len - 1 == i) return self.pop().?;
-
-            const old_item = self.items[i];
-            self.items[i] = self.pop().?;
-            return old_item;
+            const val = self.items[i];
+            self.items[i] = self.items[self.items.len - 1];
+            self.items[self.items.len - 1] = undefined;
+            self.items.len -= 1;
+            return val;
         }
 
         /// Append the slice of items to the list. Allocates more
@@ -408,7 +407,7 @@ pub fn AlignedManaged(comptime T: type, comptime alignment: ?mem.Alignment) type
             // Protects growing unnecessarily since better_capacity will be larger.
             if (self.capacity >= new_capacity) return;
 
-            const better_capacity = Aligned(T, alignment).growCapacity(self.capacity, new_capacity);
+            const better_capacity = Aligned(T, alignment).growCapacity(new_capacity);
             return self.ensureTotalCapacityPrecise(better_capacity);
         }
 
@@ -522,6 +521,7 @@ pub fn AlignedManaged(comptime T: type, comptime alignment: ?mem.Alignment) type
         pub fn pop(self: *Self) ?T {
             if (self.items.len == 0) return null;
             const val = self.items[self.items.len - 1];
+            self.items[self.items.len - 1] = undefined;
             self.items.len -= 1;
             return val;
         }
@@ -544,8 +544,7 @@ pub fn AlignedManaged(comptime T: type, comptime alignment: ?mem.Alignment) type
         /// Returns the last element from the list.
         /// Asserts that the list is not empty.
         pub fn getLast(self: Self) T {
-            const val = self.items[self.items.len - 1];
-            return val;
+            return self.items[self.items.len - 1];
         }
 
         /// Returns the last element from the list, or `null` if list is empty.
@@ -956,14 +955,13 @@ pub fn Aligned(comptime T: type, comptime alignment: ?mem.Alignment) type {
         /// The empty slot is filled from the end of the list.
         /// Invalidates pointers to last element.
         /// This operation is O(1).
-        /// Asserts that the list is not empty.
         /// Asserts that the index is in bounds.
         pub fn swapRemove(self: *Self, i: usize) T {
-            if (self.items.len - 1 == i) return self.pop().?;
-
-            const old_item = self.items[i];
-            self.items[i] = self.pop().?;
-            return old_item;
+            const val = self.items[i];
+            self.items[i] = self.items[self.items.len - 1];
+            self.items[self.items.len - 1] = undefined;
+            self.items.len -= 1;
+            return val;
         }
 
         /// Append the slice of items to the list. Allocates more
@@ -1160,7 +1158,7 @@ pub fn Aligned(comptime T: type, comptime alignment: ?mem.Alignment) type {
         /// Invalidates element pointers if additional memory is needed.
         pub fn ensureTotalCapacity(self: *Self, gpa: Allocator, new_capacity: usize) Allocator.Error!void {
             if (self.capacity >= new_capacity) return;
-            return self.ensureTotalCapacityPrecise(gpa, growCapacity(self.capacity, new_capacity));
+            return self.ensureTotalCapacityPrecise(gpa, growCapacity(new_capacity));
         }
 
         /// If the current capacity is less than `new_capacity`, this function will
@@ -1327,6 +1325,7 @@ pub fn Aligned(comptime T: type, comptime alignment: ?mem.Alignment) type {
         pub fn pop(self: *Self) ?T {
             if (self.items.len == 0) return null;
             const val = self.items[self.items.len - 1];
+            self.items[self.items.len - 1] = undefined;
             self.items.len -= 1;
             return val;
         }
@@ -1348,8 +1347,7 @@ pub fn Aligned(comptime T: type, comptime alignment: ?mem.Alignment) type {
         /// Return the last element from the list.
         /// Asserts that the list is not empty.
         pub fn getLast(self: Self) T {
-            const val = self.items[self.items.len - 1];
-            return val;
+            return self.items[self.items.len - 1];
         }
 
         /// Return the last element from the list, or
@@ -1359,17 +1357,12 @@ pub fn Aligned(comptime T: type, comptime alignment: ?mem.Alignment) type {
             return self.getLast();
         }
 
-        const init_capacity = @as(comptime_int, @max(1, std.atomic.cache_line / @sizeOf(T)));
+        const init_capacity: comptime_int = @max(1, std.atomic.cache_line / @sizeOf(T));
 
         /// Called when memory growth is necessary. Returns a capacity larger than
         /// minimum that grows super-linearly.
-        pub fn growCapacity(current: usize, minimum: usize) usize {
-            var new = current;
-            while (true) {
-                new +|= new / 2 + init_capacity;
-                if (new >= minimum)
-                    return new;
-            }
+        pub fn growCapacity(minimum: usize) usize {
+            return minimum +| (minimum / 2 + init_capacity);
         }
     };
 }

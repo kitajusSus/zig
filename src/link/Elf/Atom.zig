@@ -894,7 +894,7 @@ pub fn setExtra(atom: Atom, extras: Extra, elf_file: *Elf) void {
     atom.file(elf_file).?.setAtomExtra(atom.extra_index, extras);
 }
 
-pub fn fmt(atom: Atom, elf_file: *Elf) std.fmt.Formatter(Format, Format.default) {
+pub fn fmt(atom: Atom, elf_file: *Elf) std.fmt.Alt(Format, Format.default) {
     return .{ .data = .{
         .atom = atom,
         .elf_file = elf_file,
@@ -1473,9 +1473,9 @@ const x86_64 = struct {
         for (insts) |inst| try inst.encode(&writer, .{});
     }
 
-    const bits = @import("../../arch/x86_64/bits.zig");
-    const encoder = @import("../../arch/x86_64/encoder.zig");
-    const Disassembler = @import("../../arch/x86_64/Disassembler.zig");
+    const bits = @import("../../codegen/x86_64/bits.zig");
+    const encoder = @import("../../codegen/x86_64/encoder.zig");
+    const Disassembler = @import("../../codegen/x86_64/Disassembler.zig");
     const Immediate = Instruction.Immediate;
     const Instruction = encoder.Instruction;
 };

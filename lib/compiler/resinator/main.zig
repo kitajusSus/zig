@@ -13,6 +13,7 @@ const cvtres = @import("cvtres.zig");
 const hasDisjointCodePage = @import("disjoint_code_page.zig").hasDisjointCodePage;
 const fmtResourceType = @import("res.zig").NameOrOrdinal.fmtResourceType;
 const aro = @import("aro");
+const compiler_util = @import("../util.zig");
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -120,7 +121,20 @@ pub fn main() !void {
             defer aro_arena_state.deinit();
             const aro_arena = aro_arena_state.allocator();
 
-            var comp = aro.Compilation.init(aro_arena, std.fs.cwd());
+            var stderr_buf: [512]u8 = undefined;
+            var stderr_writer = stderr.writer(&stderr_buf);
+            var diagnostics: aro.Diagnostics = switch (zig_integration) {
+                false => .{ .output = .{ .to_writer = .{
+                    .writer = &stderr_writer.interface,
+                    .color = stderr_config,
+                } } },
+                true => .{ .output = .{ .to_list = .{
+                    .arena = .init(allocator),
+                } } },
+            };
+            defer diagnostics.deinit();
+
+            var comp = aro.Compilation.init(aro_arena, aro_arena, &diagnostics, std.fs.cwd());
             defer comp.deinit();
 
             var argv: std.ArrayList([]const u8) = .empty;
@@ -145,16 +159,20 @@ pub fn main() !void {
 
             preprocess.preprocess(&comp, &preprocessed_buf.writer, argv.items, maybe_dependencies) catch |err| switch (err) {
                 error.GeneratedSourceError => {
-                    try error_handler.emitAroDiagnostics(allocator, "failed during preprocessor setup (this is always a bug):", &comp);
+                    try error_handler.emitAroDiagnostics(allocator, "failed during preprocessor setup (this is always a bug)", &comp);
                     std.process.exit(1);
                 },
                 // ArgError can occur if e.g. the .rc file is not found
                 error.ArgError, error.PreprocessError => {
-                    try error_handler.emitAroDiagnostics(allocator, "failed during preprocessing:", &comp);
+                    try error_handler.emitAroDiagnostics(allocator, "failed during preprocessing", &comp);
                     std.process.exit(1);
                 },
-                error.StreamTooLong => {
+                error.FileTooBig => {
                     try error_handler.emitMessage(allocator, .err, "failed during preprocessing: maximum file size exceeded", .{});
+                    std.process.exit(1);
+                },
+                error.WriteFailed => {
+                    try error_handler.emitMessage(allocator, .err, "failed during preprocessing: error writing the preprocessed output", .{});
                     std.process.exit(1);
                 },
                 error.OutOfMemory => |e| return e,
@@ -510,7 +528,7 @@ const LazyIncludePaths = struct {
     arena: std.mem.Allocator,
     auto_includes_option: cli.Options.AutoIncludes,
     zig_lib_dir: []const u8,
-    target_machine_type: std.coff.MachineType,
+    target_machine_type: std.coff.IMAGE.FILE.MACHINE,
     resolved_include_paths: ?[]const []const u8 = null,
 
     pub fn get(self: *LazyIncludePaths, error_handler: *ErrorHandler) ![]const []const u8 {
@@ -538,11 +556,11 @@ const LazyIncludePaths = struct {
     }
 };
 
-fn getIncludePaths(arena: std.mem.Allocator, auto_includes_option: cli.Options.AutoIncludes, zig_lib_dir: []const u8, target_machine_type: std.coff.MachineType) ![]const []const u8 {
+fn getIncludePaths(arena: std.mem.Allocator, auto_includes_option: cli.Options.AutoIncludes, zig_lib_dir: []const u8, target_machine_type: std.coff.IMAGE.FILE.MACHINE) ![]const []const u8 {
     if (auto_includes_option == .none) return &[_][]const u8{};
 
     const includes_arch: std.Target.Cpu.Arch = switch (target_machine_type) {
-        .X64 => .x86_64,
+        .AMD64 => .x86_64,
         .I386 => .x86,
         .ARMNT => .thumb,
         .ARM64 => .aarch64,
@@ -654,17 +672,20 @@ const ErrorHandler = union(enum) {
     ) !void {
         switch (self.*) {
             .server => |*server| {
-                var error_bundle = try aroDiagnosticsToErrorBundle(allocator, fail_msg, comp);
+                var error_bundle = try compiler_util.aroDiagnosticsToErrorBundle(
+                    comp.diagnostics,
+                    allocator,
+                    fail_msg,
+                );
                 defer error_bundle.deinit(allocator);
 
                 try server.serveErrorBundle(error_bundle);
             },
             .tty => {
-                // extra newline to separate this line from the aro errors
+                // aro errors have already been emitted
                 const stderr = std.debug.lockStderrWriter(&.{});
                 defer std.debug.unlockStderrWriter();
-                try renderErrorMessage(stderr, self.tty, .err, "{s}\n", .{fail_msg});
-                aro.Diagnostics.render(comp, self.tty);
+                try renderErrorMessage(stderr, self.tty, .err, "{s}", .{fail_msg});
             },
         }
     }
@@ -737,7 +758,7 @@ fn cliDiagnosticsToErrorBundle(
         switch (err_details.type) {
             .err => {
                 if (cur_err) |err| {
-                    try flushErrorMessageIntoBundle(&bundle, err, cur_notes.items);
+                    try bundle.addRootErrorMessageWithNotes(err, cur_notes.items);
                 }
                 cur_err = .{
                     .msg = try bundle.addString(err_details.msg.items),
@@ -755,7 +776,7 @@ fn cliDiagnosticsToErrorBundle(
         }
     }
     if (cur_err) |err| {
-        try flushErrorMessageIntoBundle(&bundle, err, cur_notes.items);
+        try bundle.addRootErrorMessageWithNotes(err, cur_notes.items);
     }
 
     return try bundle.toOwnedBundle("");
@@ -824,7 +845,7 @@ fn diagnosticsToErrorBundle(
         switch (err_details.type) {
             .err => {
                 if (cur_err) |err| {
-                    try flushErrorMessageIntoBundle(&bundle, err, cur_notes.items);
+                    try bundle.addRootErrorMessageWithNotes(err, cur_notes.items);
                 }
                 cur_err = .{
                     .msg = try bundle.addString(msg_buf.written()),
@@ -843,18 +864,10 @@ fn diagnosticsToErrorBundle(
         }
     }
     if (cur_err) |err| {
-        try flushErrorMessageIntoBundle(&bundle, err, cur_notes.items);
+        try bundle.addRootErrorMessageWithNotes(err, cur_notes.items);
     }
 
     return try bundle.toOwnedBundle("");
-}
-
-fn flushErrorMessageIntoBundle(wip: *ErrorBundle.Wip, msg: ErrorBundle.ErrorMessage, notes: []const ErrorBundle.ErrorMessage) !void {
-    try wip.addRootErrorMessage(msg);
-    const notes_start = try wip.reserveNotes(@intCast(notes.len));
-    for (notes_start.., notes) |i, note| {
-        wip.extra.items[i] = @intFromEnum(wip.addErrorMessageAssumeCapacity(note));
-    }
 }
 
 fn errorStringToErrorBundle(allocator: std.mem.Allocator, comptime format: []const u8, args: anytype) !ErrorBundle {
@@ -867,146 +880,3 @@ fn errorStringToErrorBundle(allocator: std.mem.Allocator, comptime format: []con
     });
     return try bundle.toOwnedBundle("");
 }
-
-fn aroDiagnosticsToErrorBundle(
-    gpa: std.mem.Allocator,
-    fail_msg: []const u8,
-    comp: *aro.Compilation,
-) !ErrorBundle {
-    @branchHint(.cold);
-
-    var bundle: ErrorBundle.Wip = undefined;
-    try bundle.init(gpa);
-    errdefer bundle.deinit();
-
-    try bundle.addRootErrorMessage(.{
-        .msg = try bundle.addString(fail_msg),
-    });
-
-    var msg_writer = MsgWriter.init(gpa);
-    defer msg_writer.deinit();
-    var cur_err: ?ErrorBundle.ErrorMessage = null;
-    var cur_notes: std.ArrayList(ErrorBundle.ErrorMessage) = .empty;
-    defer cur_notes.deinit(gpa);
-    for (comp.diagnostics.list.items) |msg| {
-        switch (msg.kind) {
-            // Clear the current error so that notes don't bleed into unassociated errors
-            .off, .warning => {
-                cur_err = null;
-                continue;
-            },
-            .note => if (cur_err == null) continue,
-            .@"fatal error", .@"error" => {},
-            .default => unreachable,
-        }
-        msg_writer.resetRetainingCapacity();
-        aro.Diagnostics.renderMessage(comp, &msg_writer, msg);
-
-        const src_loc = src_loc: {
-            if (msg_writer.path) |src_path| {
-                var src_loc: ErrorBundle.SourceLocation = .{
-                    .src_path = try bundle.addString(src_path),
-                    .line = msg_writer.line - 1, // 1-based -> 0-based
-                    .column = msg_writer.col - 1, // 1-based -> 0-based
-                    .span_start = 0,
-                    .span_main = 0,
-                    .span_end = 0,
-                };
-                if (msg_writer.source_line) |source_line| {
-                    src_loc.span_start = msg_writer.span_main;
-                    src_loc.span_main = msg_writer.span_main;
-                    src_loc.span_end = msg_writer.span_main;
-                    src_loc.source_line = try bundle.addString(source_line);
-                }
-                break :src_loc try bundle.addSourceLocation(src_loc);
-            }
-            break :src_loc ErrorBundle.SourceLocationIndex.none;
-        };
-
-        switch (msg.kind) {
-            .@"fatal error", .@"error" => {
-                if (cur_err) |err| {
-                    try flushErrorMessageIntoBundle(&bundle, err, cur_notes.items);
-                }
-                cur_err = .{
-                    .msg = try bundle.addString(msg_writer.buf.items),
-                    .src_loc = src_loc,
-                };
-                cur_notes.clearRetainingCapacity();
-            },
-            .note => {
-                cur_err.?.notes_len += 1;
-                try cur_notes.append(gpa, .{
-                    .msg = try bundle.addString(msg_writer.buf.items),
-                    .src_loc = src_loc,
-                });
-            },
-            .off, .warning, .default => unreachable,
-        }
-    }
-    if (cur_err) |err| {
-        try flushErrorMessageIntoBundle(&bundle, err, cur_notes.items);
-    }
-
-    return try bundle.toOwnedBundle("");
-}
-
-// Similar to aro.Diagnostics.MsgWriter but:
-// - Writers to an ArrayList
-// - Only prints the message itself (no location, source line, error: prefix, etc)
-// - Keeps track of source path/line/col instead
-const MsgWriter = struct {
-    buf: std.array_list.Managed(u8),
-    path: ?[]const u8 = null,
-    // 1-indexed
-    line: u32 = undefined,
-    col: u32 = undefined,
-    source_line: ?[]const u8 = null,
-    span_main: u32 = undefined,
-
-    fn init(allocator: std.mem.Allocator) MsgWriter {
-        return .{
-            .buf = std.array_list.Managed(u8).init(allocator),
-        };
-    }
-
-    fn deinit(m: *MsgWriter) void {
-        m.buf.deinit();
-    }
-
-    fn resetRetainingCapacity(m: *MsgWriter) void {
-        m.buf.clearRetainingCapacity();
-        m.path = null;
-        m.source_line = null;
-    }
-
-    pub fn print(m: *MsgWriter, comptime fmt: []const u8, args: anytype) void {
-        m.buf.print(fmt, args) catch {};
-    }
-
-    pub fn write(m: *MsgWriter, msg: []const u8) void {
-        m.buf.appendSlice(msg) catch {};
-    }
-
-    pub fn setColor(m: *MsgWriter, color: std.Io.tty.Color) void {
-        _ = m;
-        _ = color;
-    }
-
-    pub fn location(m: *MsgWriter, path: []const u8, line: u32, col: u32) void {
-        m.path = path;
-        m.line = line;
-        m.col = col;
-    }
-
-    pub fn start(m: *MsgWriter, kind: aro.Diagnostics.Kind) void {
-        _ = m;
-        _ = kind;
-    }
-
-    pub fn end(m: *MsgWriter, maybe_line: ?[]const u8, col: u32, end_with_splice: bool) void {
-        _ = end_with_splice;
-        m.source_line = maybe_line;
-        m.span_main = col;
-    }
-};

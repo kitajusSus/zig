@@ -102,7 +102,7 @@ const DebugFrame = struct {
         } + switch (target.cpu.arch) {
             .x86_64 => len: {
                 dev.check(.x86_64_backend);
-                const Register = @import("../arch/x86_64/bits.zig").Register;
+                const Register = @import("../codegen/x86_64/bits.zig").Register;
                 break :len uleb128Bytes(1) + sleb128Bytes(-8) + uleb128Bytes(Register.rip.dwarfNum()) +
                     1 + uleb128Bytes(Register.rsp.dwarfNum()) + sleb128Bytes(-1) +
                     1 + uleb128Bytes(1);
@@ -2126,19 +2126,22 @@ pub const WipNav = struct {
         const size = if (ty.hasRuntimeBits(wip_nav.pt.zcu)) ty.abiSize(wip_nav.pt.zcu) else 0;
         try diw.writeUleb128(size);
         if (size == 0) return;
-        var bytes = wip_nav.debug_info.toArrayList();
-        defer wip_nav.debug_info = .fromArrayList(wip_nav.dwarf.gpa, &bytes);
-        const old_len = bytes.items.len;
+        const old_end = wip_nav.debug_info.writer.end;
         try codegen.generateSymbol(
             wip_nav.dwarf.bin_file,
             wip_nav.pt,
             src_loc,
             val,
-            &bytes,
+            &wip_nav.debug_info.writer,
             .{ .debug_output = .{ .dwarf = wip_nav } },
         );
-        if (old_len + size != bytes.items.len) {
-            std.debug.print("{f} [{}]: {} != {}\n", .{ ty.fmt(wip_nav.pt), ty.toIntern(), size, bytes.items.len - old_len });
+        if (old_end + size != wip_nav.debug_info.writer.end) {
+            std.debug.print("{f} [{}]: {} != {}\n", .{
+                ty.fmt(wip_nav.pt),
+                ty.toIntern(),
+                size,
+                wip_nav.debug_info.writer.end - old_end,
+            });
             unreachable;
         }
     }
@@ -2346,7 +2349,7 @@ pub fn init(lf: *link.File, format: DW.Format) Dwarf {
         .debug_aranges = .{ .section = Section.init },
         .debug_frame = .{
             .header = if (target.cpu.arch == .x86_64 and target.ofmt == .elf) header: {
-                const Register = @import("../arch/x86_64/bits.zig").Register;
+                const Register = @import("../codegen/x86_64/bits.zig").Register;
                 break :header comptime .{
                     .format = .eh_frame,
                     .code_alignment_factor = 1,
@@ -4061,6 +4064,7 @@ fn updateLazyValue(
         },
         .error_union => |error_union| {
             try wip_nav.abbrevCode(.aggregate_comptime_value);
+            try wip_nav.refType(.fromInterned(error_union.ty));
             var err_buf: [4]u8 = undefined;
             const err_bytes = err_buf[0 .. std.math.divCeil(u17, zcu.errorSetBits(), 8) catch unreachable];
             dwarf.writeInt(err_bytes, switch (error_union.val) {
@@ -4098,7 +4102,6 @@ fn updateLazyValue(
                 try diw.writeUleb128(err_bytes.len);
                 try diw.writeAll(err_bytes);
             }
-            try wip_nav.refType(.fromInterned(error_union.ty));
             try diw.writeUleb128(@intFromEnum(AbbrevCode.null));
         },
         .enum_literal => |enum_literal| {
@@ -4830,7 +4833,7 @@ fn flushWriterError(dwarf: *Dwarf, pt: Zcu.PerThread) (FlushError || Writer.Erro
             .eh_frame => switch (target.cpu.arch) {
                 .x86_64 => {
                     dev.check(.x86_64_backend);
-                    const Register = @import("../arch/x86_64/bits.zig").Register;
+                    const Register = @import("../codegen/x86_64/bits.zig").Register;
                     for (dwarf.debug_frame.section.units.items) |*unit| {
                         header_aw.clearRetainingCapacity();
                         try header_aw.ensureTotalCapacity(unit.header_len);
@@ -4849,7 +4852,7 @@ fn flushWriterError(dwarf: *Dwarf, pt: Zcu.PerThread) (FlushError || Writer.Erro
                         hw.writeSleb128(dwarf.debug_frame.header.data_alignment_factor) catch unreachable;
                         hw.writeUleb128(dwarf.debug_frame.header.return_address_register) catch unreachable;
                         hw.writeUleb128(1) catch unreachable;
-                        hw.writeByte(DW.EH.PE.pcrel | DW.EH.PE.sdata4) catch unreachable;
+                        hw.writeByte(@bitCast(@as(DW.EH.PE, .{ .type = .sdata4, .rel = .pcrel }))) catch unreachable;
                         hw.writeByte(DW.CFA.def_cfa_sf) catch unreachable;
                         hw.writeUleb128(Register.rsp.dwarfNum()) catch unreachable;
                         hw.writeSleb128(-1) catch unreachable;
@@ -6429,7 +6432,7 @@ fn sleb128Bytes(value: anytype) u32 {
 /// overrides `-fno-incremental` for testing incremental debug info until `-fincremental` is functional
 const force_incremental = false;
 inline fn incremental(dwarf: Dwarf) bool {
-    return force_incremental or dwarf.bin_file.comp.incremental;
+    return force_incremental or dwarf.bin_file.comp.config.incremental;
 }
 
 const Allocator = std.mem.Allocator;

@@ -901,9 +901,9 @@ const x86_64 = struct {
         for (insts) |inst| try inst.encode(&stream, .{});
     }
 
-    const bits = @import("../../arch/x86_64/bits.zig");
-    const encoder = @import("../../arch/x86_64/encoder.zig");
-    const Disassembler = @import("../../arch/x86_64/Disassembler.zig");
+    const bits = @import("../../codegen/x86_64/bits.zig");
+    const encoder = @import("../../codegen/x86_64/encoder.zig");
+    const Disassembler = @import("../../codegen/x86_64/Disassembler.zig");
     const Immediate = bits.Immediate;
     const Instruction = encoder.Instruction;
 };
@@ -1073,7 +1073,7 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: []macho.r
     assert(i == buffer.len);
 }
 
-pub fn fmt(atom: Atom, macho_file: *MachO) std.fmt.Formatter(Format, Format.print) {
+pub fn fmt(atom: Atom, macho_file: *MachO) std.fmt.Alt(Format, Format.print) {
     return .{ .data = .{
         .atom = atom,
         .macho_file = macho_file,

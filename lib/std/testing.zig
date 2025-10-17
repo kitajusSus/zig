@@ -135,15 +135,9 @@ fn expectEqualInner(comptime T: type, expected: T, actual: T) !void {
         .array => |array| try expectEqualSlices(array.child, &expected, &actual),
 
         .vector => |info| {
-            var i: usize = 0;
-            while (i < info.len) : (i += 1) {
-                if (!std.meta.eql(expected[i], actual[i])) {
-                    print("index {d} incorrect. expected {any}, found {any}\n", .{
-                        i, expected[i], actual[i],
-                    });
-                    return error.TestExpectedEqual;
-                }
-            }
+            const expect_array: [info.len]info.child = expected;
+            const actual_array: [info.len]info.child = actual;
+            try expectEqualSlices(info.child, &expect_array, &actual_array);
         },
 
         .@"struct" => |structType| {
@@ -828,8 +822,7 @@ fn expectEqualDeepInner(comptime T: type, expected: T, actual: T) error{TestExpe
                 print("Vector len not the same, expected {d}, found {d}\n", .{ info.len, @typeInfo(@TypeOf(actual)).vector.len });
                 return error.TestExpectedEqual;
             }
-            var i: usize = 0;
-            while (i < info.len) : (i += 1) {
+            inline for (0..info.len) |i| {
                 expectEqualDeep(expected[i], actual[i]) catch |e| {
                     print("index {d} incorrect. expected {any}, found {any}\n", .{
                         i, expected[i], actual[i],
@@ -1247,5 +1240,65 @@ pub const Reader = struct {
             r.next_offset = 0;
         }
         return n;
+    }
+};
+
+/// A `std.Io.Reader` that gets its data from another `std.Io.Reader`, and always
+/// writes to its own buffer (and returns 0) during `stream` and `readVec`.
+pub const ReaderIndirect = struct {
+    in: *std.Io.Reader,
+    interface: std.Io.Reader,
+
+    pub fn init(in: *std.Io.Reader, buffer: []u8) ReaderIndirect {
+        return .{
+            .in = in,
+            .interface = .{
+                .vtable = &.{
+                    .stream = stream,
+                    .readVec = readVec,
+                },
+                .buffer = buffer,
+                .seek = 0,
+                .end = 0,
+            },
+        };
+    }
+
+    fn readVec(r: *std.Io.Reader, _: [][]u8) std.Io.Reader.Error!usize {
+        try streamInner(r);
+        return 0;
+    }
+
+    fn stream(r: *std.Io.Reader, _: *std.Io.Writer, _: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        try streamInner(r);
+        return 0;
+    }
+
+    fn streamInner(r: *std.Io.Reader) std.Io.Reader.Error!void {
+        const r_indirect: *ReaderIndirect = @alignCast(@fieldParentPtr("interface", r));
+
+        // If there's no room remaining in the buffer at all, make room.
+        if (r.buffer.len == r.end) {
+            try r.rebase(r.buffer.len);
+        }
+
+        var writer: std.Io.Writer = .{
+            .buffer = r.buffer,
+            .end = r.end,
+            .vtable = &.{
+                .drain = std.Io.Writer.unreachableDrain,
+                .rebase = std.Io.Writer.unreachableRebase,
+            },
+        };
+        defer r.end = writer.end;
+
+        r_indirect.in.streamExact(&writer, r.buffer.len - r.end) catch |err| switch (err) {
+            // Only forward EndOfStream if no new bytes were written to the buffer
+            error.EndOfStream => |e| if (r.end == writer.end) {
+                return e;
+            },
+            error.WriteFailed => unreachable,
+            else => |e| return e,
+        };
     }
 };

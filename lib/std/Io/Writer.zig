@@ -865,6 +865,11 @@ pub inline fn writeSliceEndian(
     slice: []const Elem,
     endian: std.builtin.Endian,
 ) Error!void {
+    switch (@typeInfo(Elem)) {
+        .@"struct" => |info| comptime assert(info.layout != .auto),
+        .int, .@"enum" => {},
+        else => @compileError("ill-defined memory layout"),
+    }
     if (native_endian == endian) {
         return writeAll(w, @ptrCast(slice));
     } else {
@@ -918,10 +923,12 @@ pub fn sendFileHeader(
     return n;
 }
 
-/// Asserts nonzero buffer capacity.
+/// Asserts nonzero buffer capacity and nonzero `limit`.
 pub fn sendFileReading(w: *Writer, file_reader: *File.Reader, limit: Limit) FileReadingError!usize {
+    assert(limit != .nothing);
     const dest = limit.slice(try w.writableSliceGreedy(1));
-    const n = try file_reader.read(dest);
+    const n = try file_reader.interface.readSliceShort(dest);
+    if (n == 0) return error.EndOfStream;
     w.advance(n);
     return n;
 }
@@ -1365,19 +1372,12 @@ pub fn printValue(
         },
         .array => {
             if (!is_any) @compileError("cannot format array without a specifier (i.e. {s} or {any})");
-            if (max_depth == 0) return w.writeAll("{ ... }");
-            try w.writeAll("{ ");
-            for (value, 0..) |elem, i| {
-                try w.printValue(fmt, options, elem, max_depth - 1);
-                if (i < value.len - 1) {
-                    try w.writeAll(", ");
-                }
-            }
-            try w.writeAll(" }");
+            return printArray(w, fmt, options, &value, max_depth);
         },
-        .vector => {
+        .vector => |vector| {
             if (!is_any and fmt.len != 0) invalidFmtError(fmt, value);
-            return printVector(w, fmt, options, value, max_depth);
+            const array: [vector.len]vector.child = value;
+            return printArray(w, fmt, options, &array, max_depth);
         },
         .@"fn" => @compileError("unable to format function body type, use '*const " ++ @typeName(T) ++ "' for a function pointer type"),
         .type => {
@@ -1431,12 +1431,25 @@ pub fn printVector(
     value: anytype,
     max_depth: usize,
 ) Error!void {
-    const len = @typeInfo(@TypeOf(value)).vector.len;
+    const vector = @typeInfo(@TypeOf(value)).vector;
+    const array: [vector.len]vector.child = value;
+    return printArray(w, fmt, options, &array, max_depth);
+}
+
+pub fn printArray(
+    w: *Writer,
+    comptime fmt: []const u8,
+    options: std.fmt.Options,
+    ptr_to_array: anytype,
+    max_depth: usize,
+) Error!void {
     if (max_depth == 0) return w.writeAll("{ ... }");
     try w.writeAll("{ ");
-    inline for (0..len) |i| {
-        try w.printValue(fmt, options, value[i], max_depth - 1);
-        if (i < len - 1) try w.writeAll(", ");
+    for (ptr_to_array, 0..) |elem, i| {
+        try w.printValue(fmt, options, elem, max_depth - 1);
+        if (i < ptr_to_array.len - 1) {
+            try w.writeAll(", ");
+        }
     }
     try w.writeAll(" }");
 }
@@ -2541,13 +2554,17 @@ pub const Allocating = struct {
     alignment: std.mem.Alignment,
 
     pub fn init(allocator: Allocator) Allocating {
+        return .initAligned(allocator, .of(u8));
+    }
+
+    pub fn initAligned(allocator: Allocator, alignment: std.mem.Alignment) Allocating {
         return .{
             .allocator = allocator,
             .writer = .{
                 .buffer = &.{},
                 .vtable = &vtable,
             },
-            .alignment = .of(u8),
+            .alignment = alignment,
         };
     }
 
@@ -2652,7 +2669,7 @@ pub const Allocating = struct {
     pub fn ensureTotalCapacity(a: *Allocating, new_capacity: usize) Allocator.Error!void {
         // Protects growing unnecessarily since better_capacity will be larger.
         if (a.writer.buffer.len >= new_capacity) return;
-        const better_capacity = ArrayList(u8).growCapacity(a.writer.buffer.len, new_capacity);
+        const better_capacity = ArrayList(u8).growCapacity(new_capacity);
         return ensureTotalCapacityPrecise(a, better_capacity);
     }
 
@@ -2763,7 +2780,8 @@ pub const Allocating = struct {
         if (additional == 0) return error.EndOfStream;
         a.ensureUnusedCapacity(limit.minInt64(additional)) catch return error.WriteFailed;
         const dest = limit.slice(a.writer.buffer[a.writer.end..]);
-        const n = try file_reader.read(dest);
+        const n = try file_reader.interface.readSliceShort(dest);
+        if (n == 0) return error.EndOfStream;
         a.writer.end += n;
         return n;
     }
@@ -2775,16 +2793,36 @@ pub const Allocating = struct {
         a.ensureUnusedCapacity(minimum_len) catch return error.WriteFailed;
     }
 
-    test Allocating {
-        var a: Allocating = .init(testing.allocator);
+    fn testAllocating(comptime alignment: std.mem.Alignment) !void {
+        var a: Allocating = .initAligned(testing.allocator, alignment);
         defer a.deinit();
         const w = &a.writer;
 
         const x: i32 = 42;
         const y: i32 = 1234;
         try w.print("x: {}\ny: {}\n", .{ x, y });
+        const expected = "x: 42\ny: 1234\n";
+        try testing.expectEqualSlices(u8, expected, a.written());
 
-        try testing.expectEqualSlices(u8, "x: 42\ny: 1234\n", a.written());
+        // exercise *Aligned methods
+        var l = a.toArrayListAligned(alignment);
+        defer l.deinit(testing.allocator);
+        try testing.expectEqualSlices(u8, expected, l.items);
+        a = .fromArrayListAligned(testing.allocator, alignment, &l);
+        try testing.expectEqualSlices(u8, expected, a.written());
+        const slice: []align(alignment.toByteUnits()) u8 = @alignCast(try a.toOwnedSlice());
+        try testing.expectEqualSlices(u8, expected, slice);
+        a = .initOwnedSliceAligned(testing.allocator, alignment, slice);
+        try testing.expectEqualSlices(u8, expected, a.writer.buffer);
+    }
+
+    test Allocating {
+        try testAllocating(.fromByteUnits(1));
+        try testAllocating(.fromByteUnits(4));
+        try testAllocating(.fromByteUnits(8));
+        try testAllocating(.fromByteUnits(16));
+        try testAllocating(.fromByteUnits(32));
+        try testAllocating(.fromByteUnits(64));
     }
 };
 
@@ -2814,18 +2852,40 @@ test "allocating sendFile" {
 
     const file = try tmp_dir.dir.createFile("input.txt", .{ .read = true });
     defer file.close();
-    var r_buffer: [256]u8 = undefined;
+    var r_buffer: [2]u8 = undefined;
     var file_writer: std.fs.File.Writer = .init(file, &r_buffer);
-    try file_writer.interface.writeByte('h');
+    try file_writer.interface.writeAll("abcd");
     try file_writer.interface.flush();
 
     var file_reader = file_writer.moveToReader();
     try file_reader.seekTo(0);
+    try file_reader.interface.fill(2);
 
     var allocating: Writer.Allocating = .init(testing.allocator);
     defer allocating.deinit();
+    try allocating.ensureUnusedCapacity(1);
+    try testing.expectEqual(4, allocating.writer.sendFileAll(&file_reader, .unlimited));
+    try testing.expectEqualStrings("abcd", allocating.writer.buffered());
+}
 
-    _ = try file_reader.interface.streamRemaining(&allocating.writer);
+test sendFileReading {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const file = try tmp_dir.dir.createFile("input.txt", .{ .read = true });
+    defer file.close();
+    var r_buffer: [2]u8 = undefined;
+    var file_writer: std.fs.File.Writer = .init(file, &r_buffer);
+    try file_writer.interface.writeAll("abcd");
+    try file_writer.interface.flush();
+
+    var file_reader = file_writer.moveToReader();
+    try file_reader.seekTo(0);
+    try file_reader.interface.fill(2);
+
+    var w_buffer: [1]u8 = undefined;
+    var discarding: Writer.Discarding = .init(&w_buffer);
+    try testing.expectEqual(4, discarding.writer.sendFileReadingAll(&file_reader, .unlimited));
 }
 
 test writeStruct {

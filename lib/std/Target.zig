@@ -1082,7 +1082,7 @@ pub fn toElfMachine(target: *const Target) std.elf.EM {
     };
 }
 
-pub fn toCoffMachine(target: *const Target) std.coff.MachineType {
+pub fn toCoffMachine(target: *const Target) std.coff.IMAGE.FILE.MACHINE {
     return switch (target.cpu.arch) {
         .arm => .ARM,
         .thumb => .ARMNT,
@@ -1092,7 +1092,7 @@ pub fn toCoffMachine(target: *const Target) std.coff.MachineType {
         .riscv32 => .RISCV32,
         .riscv64 => .RISCV64,
         .x86 => .I386,
-        .x86_64 => .X64,
+        .x86_64 => .AMD64,
 
         .amdgcn,
         .arc,
@@ -1187,7 +1187,7 @@ pub const Cpu = struct {
             pub const Index = std.math.Log2Int(std.meta.Int(.unsigned, usize_count * @bitSizeOf(usize)));
             pub const ShiftInt = std.math.Log2Int(usize);
 
-            pub const empty = Set{ .ints = [1]usize{0} ** usize_count };
+            pub const empty: Set = .{ .ints = @splat(0) };
 
             pub fn isEmpty(set: Set) bool {
                 return for (set.ints) |x| {
@@ -1903,7 +1903,7 @@ pub const Cpu = struct {
                 .csky => &csky.cpu.ck810, // gcc/clang do not have a generic csky model.
                 .hexagon => &hexagon.cpu.hexagonv68, // gcc/clang do not have a generic hexagon model.
                 .lanai => &lanai.cpu.v11, // clang does not have a generic lanai model.
-                .loongarch64 => &loongarch.cpu.loongarch64,
+                .loongarch64 => &loongarch.cpu.la64v1_0,
                 .m68k => &m68k.cpu.M68000,
                 .mips, .mipsel => &mips.cpu.mips32r2,
                 .mips64, .mips64el => &mips.cpu.mips64r2,
@@ -1912,7 +1912,11 @@ pub const Cpu = struct {
                 .powerpc64le => &powerpc.cpu.ppc64le,
                 .riscv32, .riscv32be => &riscv.cpu.baseline_rv32,
                 .riscv64, .riscv64be => &riscv.cpu.baseline_rv64,
-                .s390x => &s390x.cpu.arch8, // gcc/clang do not have a generic s390x model.
+                // gcc/clang do not have a generic s390x model.
+                .s390x => switch (os.tag) {
+                    .zos => &s390x.cpu.arch10,
+                    else => &s390x.cpu.arch8,
+                },
                 .sparc => &sparc.cpu.v9, // glibc does not work with 'plain' v8.
                 .sparc64 => switch (os.tag) {
                     .solaris => &sparc.cpu.ultrasparc3,
@@ -2459,9 +2463,9 @@ pub const DynamicLinker = struct {
                         => init("/lib/ld.so.1"),
                         else => none,
                     },
-                    // TODO: ELFv2 ABI (`/lib64/ld64.so.2`) opt-in support.
-                    .powerpc64 => if (abi == .gnu) init("/lib64/ld64.so.1") else none,
-                    .powerpc64le => if (abi == .gnu) init("/lib64/ld64.so.2") else none,
+                    .powerpc64,
+                    .powerpc64le,
+                    => if (abi == .gnu) init("/lib64/ld64.so.2") else none,
 
                     .riscv32,
                     .riscv64,

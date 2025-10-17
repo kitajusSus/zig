@@ -36,9 +36,10 @@ pub const ParsedCharLiteral = string_literal.ParsedCharLiteral;
 pub const parseCharLiteral = string_literal.parseCharLiteral;
 pub const parseNumberLiteral = number_literal.parseNumberLiteral;
 
-// Files needed by translate-c.
-pub const c_builtins = @import("zig/c_builtins.zig");
-pub const c_translation = @import("zig/c_translation.zig");
+pub const c_translation = struct {
+    pub const builtins = @import("zig/c_translation/builtins.zig");
+    pub const helpers = @import("zig/c_translation/helpers.zig");
+};
 
 pub const SrcHasher = std.crypto.hash.Blake3;
 pub const SrcHash = [16]u8;
@@ -462,12 +463,12 @@ pub const FormatId = struct {
 };
 
 /// Return a formatter for escaping a double quoted Zig string.
-pub fn fmtString(bytes: []const u8) std.fmt.Formatter([]const u8, stringEscape) {
+pub fn fmtString(bytes: []const u8) std.fmt.Alt([]const u8, stringEscape) {
     return .{ .data = bytes };
 }
 
 /// Return a formatter for escaping a single quoted Zig string.
-pub fn fmtChar(c: u21) std.fmt.Formatter(u21, charEscape) {
+pub fn fmtChar(c: u21) std.fmt.Alt(u21, charEscape) {
     return .{ .data = c };
 }
 

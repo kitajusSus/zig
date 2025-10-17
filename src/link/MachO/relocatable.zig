@@ -191,7 +191,7 @@ pub fn flushStaticLib(macho_file: *MachO, comp: *Compilation, module_obj_path: ?
                     pos = mem.alignForward(usize, pos, 2);
                     state.file_off = pos;
                     pos += @sizeOf(Archive.ar_hdr);
-                    pos += mem.alignForward(usize, o.path.basename().len + 1, ptr_width);
+                    pos += mem.alignForward(usize, std.fs.path.basename(o.path).len + 1, ptr_width);
                     pos += try macho_file.cast(usize, state.size);
                 },
                 else => unreachable,
@@ -676,11 +676,11 @@ fn writeSectionsToFile(macho_file: *MachO) !void {
     const slice = macho_file.sections.slice();
     for (slice.items(.header), slice.items(.out), slice.items(.relocs)) |header, out, relocs| {
         try macho_file.pwriteAll(out.items, header.offset);
-        try macho_file.pwriteAll(mem.sliceAsBytes(relocs.items), header.reloff);
+        try macho_file.pwriteAll(@ptrCast(relocs.items), header.reloff);
     }
 
     try macho_file.writeDataInCode();
-    try macho_file.pwriteAll(mem.sliceAsBytes(macho_file.symtab.items), macho_file.symtab_cmd.symoff);
+    try macho_file.pwriteAll(@ptrCast(macho_file.symtab.items), macho_file.symtab_cmd.symoff);
     try macho_file.pwriteAll(macho_file.strtab.items, macho_file.symtab_cmd.stroff);
 }
 

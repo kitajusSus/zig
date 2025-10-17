@@ -47,7 +47,7 @@ fn newSymbolAssumeCapacity(self: *LinkerDefined, name_off: u32, elf_file: *Elf) 
     const esym = self.symtab.addOneAssumeCapacity();
     esym.* = .{
         .st_name = name_off,
-        .st_info = elf.STB_WEAK << 4,
+        .st_info = @as(u8, elf.STB_WEAK) << 4,
         .st_other = @intFromEnum(elf.STV.HIDDEN),
         .st_shndx = elf.SHN_ABS,
         .st_value = 0,
@@ -437,7 +437,7 @@ pub fn setSymbolExtra(self: *LinkerDefined, index: u32, extra: Symbol.Extra) voi
     }
 }
 
-pub fn fmtSymtab(self: *LinkerDefined, elf_file: *Elf) std.fmt.Formatter(Format, Format.symtab) {
+pub fn fmtSymtab(self: *LinkerDefined, elf_file: *Elf) std.fmt.Alt(Format, Format.symtab) {
     return .{ .data = .{
         .self = self,
         .elf_file = elf_file,
